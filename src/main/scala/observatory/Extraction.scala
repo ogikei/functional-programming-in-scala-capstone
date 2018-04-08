@@ -4,7 +4,7 @@ import java.time.LocalDate
 
 import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.functions._
-
+import org.apache.spark.sql.types.{DoubleType, IntegerType}
 import utils.Resources.resourcePath
 import utils.SparkJob
 
@@ -13,15 +13,44 @@ import utils.SparkJob
  */
 object Extraction extends SparkJob {
 
-  import spark.implicits
+  import spark.implicits._
 
   def stations(stationFile: String): Dataset[Station] = {
     spark
         .read
         .csv(resourcePath(stationFile))
         .select(
-          concat_ws("-", coalesce())
+          concat_ws("~", coalesce('_c0, lit("")), '_c1).alias("id"),
+          '_c2.alias("latitude").cast(DoubleType),
+          '_c3.alias("longitude").cast(DoubleType)
         )
+        .where('_c2.isNotNull && '_c3.isNotNull && '_c2 =!= 0.0 && '_c3 =!= 0.0)
+        .as[Station]
+  }
+
+  def temperatures(year: Int, temperaturesFile: String): Dataset[TemperatureRecord] = {
+    spark
+        .read
+        .csv(resourcePath(temperaturesFile))
+        .select(
+          concat_ws("~", coalesce('_c0, lit("")), '_c1).alias("id"),
+          '_c2.alias("day").cast(IntegerType),
+          '_c3.alias("month").cast(IntegerType),
+          lit(year).as("year"),
+          (('_c4 - 32) / 9 * 5).alias("temperature").cast(DoubleType)
+        )
+        .where('_c4.between(-200, 200))
+        .as[TemperatureRecord]
+  }
+
+  def joined(stations: Dataset[Station], temperature: Dataset[TemperatureRecord]):
+  Dataset[JoinedFormat] = {
+    stations
+        .join(temperature, usingColumn = "id")
+        .as[Joined]
+        .map(j => (StationDate(j.dey, j.month, j.year), Location(j.latitude, j.longitude), j.temperature))
+        .toDF("date", "location", "temperature")
+        .as[JoinedFormat]
   }
 
   /**
