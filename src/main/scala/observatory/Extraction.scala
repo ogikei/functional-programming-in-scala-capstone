@@ -43,12 +43,13 @@ object Extraction extends SparkJob {
         .as[TemperatureRecord]
   }
 
-  def joined(stations: Dataset[Station], temperature: Dataset[TemperatureRecord]):
-  Dataset[JoinedFormat] = {
+  def joined(
+      stations: Dataset[Station],
+      temperature: Dataset[TemperatureRecord]): Dataset[JoinedFormat] = {
     stations
         .join(temperature, usingColumn = "id")
         .as[Joined]
-        .map(j => (StationDate(j.dey, j.month, j.year), Location(j.latitude, j.longitude), j.temperature))
+        .map(j => (StationDate(j.day, j.month, j.year), Location(j.latitude, j.longitude), j.temperature))
         .toDF("date", "location", "temperature")
         .as[JoinedFormat]
   }
@@ -59,18 +60,33 @@ object Extraction extends SparkJob {
    * @param temperaturesFile Path of the temperatures resource file to use (e.g. "/1975.csv")
    * @return A sequence containing triplets (date, location, temperature)
    */
-  def locateTemperatures(year: Year, stationsFile: String, temperaturesFile: String):
-  Iterable[(LocalDate, Location, Temperature)] = {
-    ???
+  def locateTemperatures(
+      year: Year,
+      stationsFile: String,
+      temperaturesFile: String): Iterable[(LocalDate, Location, Temperature)] = {
+    val j = joined(stations(stationsFile), temperatures(year, temperaturesFile))
+    j.collect()
+        .par
+        .map(
+          jf => (jf.date.toLocaleDate, jf.location, jf.temperature)
+        ).seq
   }
 
   /**
    * @param records A sequence containing triplets (date, location, temperature)
    * @return A sequence containing, for each location, the average temperature over the year.
    */
-  def locationYearlyAverageRecords(records: Iterable[(LocalDate, Location, Temperature)]):
-  Iterable[(Location, Temperature)] = {
-    ???
+  def locationYearlyAverageRecords(
+      records: Iterable[(LocalDate, Location, Temperature)]): Iterable[(Location, Temperature)] = {
+    records
+        .par
+        .groupBy(_._2)
+        .mapValues(
+          perItr => perItr.foldLeft(0.0) {
+            (t, r) => t + r._3 / perItr.size
+          }
+        )
+        .seq
   }
 
 }
