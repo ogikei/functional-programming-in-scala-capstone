@@ -2,56 +2,33 @@ package observatory
 
 import java.time.LocalDate
 
-import org.apache.spark.sql.Dataset
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.types.{DoubleType, IntegerType}
-import utils.Resources.resourcePath
-import utils.SparkJob
+import org.apache.spark.rdd.RDD
+
+import observatory.utils.{Resources, SparkJob}
 
 /**
  * 1st milestone: data extraction
  */
 object Extraction extends SparkJob {
 
-  import spark.implicits._
-
-  def stations(stationFile: String): Dataset[Station] = {
-    spark
-        .read
-        .csv(resourcePath(stationFile))
-        .select(
-          concat_ws("~", coalesce('_c0, lit("")), '_c1).alias("id"),
-          '_c2.alias("latitude").cast(DoubleType),
-          '_c3.alias("longitude").cast(DoubleType)
-        )
-        .where('_c2.isNotNull && '_c3.isNotNull && '_c2 =!= 0.0 && '_c3 =!= 0.0)
-        .as[Station]
+  /**
+   * @param year             Year number
+   * @param stationsFile     Path of the stations resource file to use (e.g. "/stations.csv")
+   * @param temperaturesFile Path of the temperatures resource file to use (e.g. "/1975.csv")
+   * @return A sequence containing triplets (date, location, temperature)
+   */
+  def locateTemperatures(year: Year, stationsFile: String, temperaturesFile: String):
+  Iterable[(LocalDate, Location, Temperature)] = {
+    locateTemperaturesSpark(year, stationsFile, temperaturesFile).collect().toSeq
   }
 
-  def temperatures(year: Int, temperaturesFile: String): Dataset[TemperatureRecord] = {
-    spark
-        .read
-        .csv(resourcePath(temperaturesFile))
-        .select(
-          concat_ws("~", coalesce('_c0, lit("")), '_c1).alias("id"),
-          '_c2.alias("day").cast(IntegerType),
-          '_c3.alias("month").cast(IntegerType),
-          lit(year).as("year"),
-          (('_c4 - 32) / 9 * 5).alias("temperature").cast(DoubleType)
-        )
-        .where('_c4.between(-200, 200))
-        .as[TemperatureRecord]
-  }
-
-  def joined(
-      stations: Dataset[Station],
-      temperature: Dataset[TemperatureRecord]): Dataset[JoinedFormat] = {
-    stations
-        .join(temperature, usingColumn = "id")
-        .as[Joined]
-        .map(j => (StationDate(j.day, j.month, j.year), Location(j.latitude, j.longitude), j.temperature))
-        .toDF("date", "location", "temperature")
-        .as[JoinedFormat]
+  /**
+   * @param records A sequence containing triplets (date, location, temperature)
+   * @return A sequence containing, for each location, the average temperature over the year.
+   */
+  def locationYearlyAverageRecords(records: Iterable[(LocalDate, Location, Temperature)]):
+  Iterable[(Location, Temperature)] = {
+    locationYearlyAverageRecordsSpark(spark.sparkContext.parallelize(records.toSeq)).collect().toSeq
   }
 
   /**
@@ -60,33 +37,57 @@ object Extraction extends SparkJob {
    * @param temperaturesFile Path of the temperatures resource file to use (e.g. "/1975.csv")
    * @return A sequence containing triplets (date, location, temperature)
    */
-  def locateTemperatures(
-      year: Year,
-      stationsFile: String,
-      temperaturesFile: String): Iterable[(LocalDate, Location, Temperature)] = {
-    val j = joined(stations(stationsFile), temperatures(year, temperaturesFile))
-    j.collect()
-        .par
-        .map(
-          jf => (jf.date.toLocaleDate, jf.location, jf.temperature)
-        ).seq
+  def locateTemperaturesSpark(year: Year, stationsFile: String,
+      temperaturesFile: String): RDD[(LocalDate, Location, Temperature)] = {
+
+    val stationsRaw = spark.sparkContext.textFile(fsPath(stationsFile))
+    val temperaturesRaw = spark.sparkContext.textFile(fsPath(temperaturesFile))
+
+    locateTemperaturesSpark(year, stationsRaw, temperaturesRaw)
   }
+
+  /**
+   * @param year            Year number
+   * @param stationsRaw     Lines of the stations file
+   * @param temperaturesRaw Lines of the temperatures file
+   * @return A sequence containing triplets (date, location, temperature)
+   */
+  def locateTemperaturesSpark(year: Year, stationsRaw: RDD[String],
+      temperaturesRaw: RDD[String]): RDD[(LocalDate, Location, Temperature)] = {
+
+    val stations = stationsRaw
+        .map(_.split(','))
+        .filter(_.length == 4)
+        .map(a => ((a(0), a(1)), Location(a(2).toDouble, a(3).toDouble)))
+
+    val temperatures = temperaturesRaw
+        .map(_.split(','))
+        .filter(_.length == 5)
+        .map { a =>
+          ((a(0), a(1)),
+              (LocalDate.of(year, a(2).toInt, a(3).toInt), fahrenheitToCelsius(a(4).toDouble)))
+        }
+
+    stations.join(temperatures).mapValues(v => (v._2._1, v._1, v._2._2)).values
+  }
+
+  /** @return The filesystem path of the given resource */
+  def fsPath(resource: String): String = Resources.resourcePath(resource)
+
+  /** @return Fahrenheit temperature converted to Celsius */
+  def fahrenheitToCelsius(fahrenheit: Temperature): Temperature =
+    (fahrenheit - 32) / 1.8
 
   /**
    * @param records A sequence containing triplets (date, location, temperature)
    * @return A sequence containing, for each location, the average temperature over the year.
    */
-  def locationYearlyAverageRecords(
-      records: Iterable[(LocalDate, Location, Temperature)]): Iterable[(Location, Temperature)] = {
+  def locationYearlyAverageRecordsSpark(records: RDD[(LocalDate, Location, Temperature)]):
+  RDD[(Location, Temperature)] = {
     records
-        .par
         .groupBy(_._2)
-        .mapValues(
-          perItr => perItr.foldLeft(0.0) {
-            (t, r) => t + r._3 / perItr.size
-          }
-        )
-        .seq
+        .mapValues(entries => entries.map(entry => (entry._3, 1)))
+        .mapValues(_.reduce((v1, v2) => (v1._1 + v2._1, v1._2 + v2._2)))
+        .mapValues({ case (temp, cnt) => temp / cnt })
   }
-
 }

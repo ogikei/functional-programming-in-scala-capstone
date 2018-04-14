@@ -1,56 +1,69 @@
 package observatory
 
-import scala.math._
-
 import com.sksamuel.scrimage.{Image, Pixel}
+import scala.math.{abs, sin, cos, sqrt, pow, toRadians, asin}
 
 /**
  * 2nd milestone: basic visualization
  */
 object Visualization {
 
+  val p_param = 6
+  val width = 360
+  val height = 180
+
   /**
-   * @param temperatures Known temperatures: pairs containing a location and the temperature at this location
+   * @param temperatures Known temperatures:
+   *                     pairs containing a location and the temperature at this location
    * @param location     Location where to predict the temperature
    * @return The predicted temperature at `location`
    */
-  def predictTemperature(temperatures: Iterable[(Location, Temperature)],
-                         location: Location): Double = {
-    val prediction: Iterable[(Double, Double)] = distanceTemperatureCombi(temperatures, location)
-    prediction.find(_._1 == 0.0) match {
-      case Some((_, temp)) => temp
-      case _ => inverseDistanceWeighted(prediction, power = 3)
-    }
-  }
+  def predictTemperature(temperatures: Iterable[(Location, Temperature)], location: Location):
+  Temperature = {
+    val dists = temperatures.map(entry => (computeDist(location, entry._1), entry._2))
 
-  def distanceTemperatureCombi(temperatures: Iterable[(Location, Double)],
-                               location: Location): Iterable[(Double, Double)] = {
-    temperatures.map {
-      case (otherLocation, temperature) =>
-        (location.point haversineEarthDistance otherLocation.point, temperature)
+    val min = dists.reduce((a, b) => if (a._1 < b._1) a else b)
+    if (min._1 < 1) {
+      // a close enough station (< 1km), take its temperature
+      min._2
+    } else {
+      // interpolate
+      val weights = dists.map(entry => (1 / pow(entry._1, p_param), entry._2))
+      val normalizer = weights.map(_._1).sum
+      weights.map(entry => entry._1 * entry._2).sum / normalizer
     }
   }
 
   /**
-   * https://en.wikipedia.org/wiki/Inverse_distance_weighting
-   *
-   * @param distanceTemperatureCombinations
-   * @param power
-   * @return
+   * @param a First location
+   * @param b Second location
+   * @return Are the locations antipodes?
    */
-  def inverseDistanceWeighted(distanceTemperatureCombinations: Iterable[(Double, Double)],
-                              power: Int): Double = {
-    val (weightedSum, inverseWeightedSum) = distanceTemperatureCombinations
-        .aggregate((0.0, 0.0))(
-          {
-            case ((ws, iws), (distance, temp)) =>
-              val w = 1 / pow(distance, power)
-              (w * temp + ws, w + iws)
-          }, {
-            case ((wsA, iwsA), (wsB, iwsB)) => (wsA + wsB, iwsA + iwsB)
-          }
+  def areAntipodes(a: Location, b: Location): Boolean = {
+    (a.lat == -b.lat) && (abs(a.lon - b.lon) == 180)
+  }
+
+  /**
+   * @param a First location
+   * @param b Second location
+   * @return Great-circle distance between a and b
+   */
+  def computeDist(a: Location, b: Location): Double = {
+    if (a == b) {
+      0
+    } else if (areAntipodes(a, b)) {
+      earthRadius * math.Pi
+    } else {
+      val delta_lon = toRadians(abs(a.lon - b.lon))
+      val alat = toRadians(a.lat)
+      val blat = toRadians(b.lat)
+      val delta_lat = abs(alat - blat)
+      val delta_sigma =
+        2 * asin(
+          sqrt(pow(sin(delta_lat / 2), 2) + cos(alat) * cos(blat) * pow(sin(delta_lon / 2), 2))
         )
-    weightedSum / inverseWeightedSum
+      earthRadius * delta_sigma
+    }
   }
 
   /**
@@ -59,54 +72,31 @@ object Visualization {
    * @return The color that corresponds to `value`, according to the color scale defined by `points`
    */
   def interpolateColor(points: Iterable[(Temperature, Color)], value: Temperature): Color = {
-    points.find(_._1 == value) match {
-      case Some((_, color)) => color
-      case None =>
-        val (smaller, greater) = points.toList.sortBy(_._1).partition(_._1 < value)
-        linearInterpolation(smaller.reverse.headOption, greater.reverse.headOption, value)
-    }
-  }
+    val sameCol = points.find(_._1 == value)
+    sameCol match {
+      case Some((_, col)) => col
+      case _ =>
+        val (smaller, bigger) = points.partition(_._1 < value)
+        if (smaller.isEmpty) {
+          bigger.minBy(_._1)._2
+        } else {
+          val a = smaller.maxBy(_._1)
+          if (bigger.isEmpty) {
+            a._2
+          } else {
+            val b = bigger.minBy(_._1)
+            val wa = 1 / abs(a._1 - value)
+            val wb = 1 / abs(b._1 - value)
 
-  /**
-   * Calculates the color based on linear interpolation of the value
-   * between ColorPoint A and ColorPointB
-   * https://ja.wikipedia.org/wiki/線形補間
-   *
-   * @param pointA tuple of value & color
-   * @param pointB tuple of value & color
-   * @param value  for interpolation
-   * @return Color
-   */
-  def linearInterpolation(pointA: Option[(Double, Color)],
-                          pointB: Option[(Double, Color)], value: Double): Color =
-    (pointA, pointB) match {
-      case (Some((pAValue, pAColor)), Some((pBValue, pBColor))) =>
-        val li = linearInterpolationValue(pAValue, pBValue, value) _
-        Color(
-          li(pAColor.red, pBColor.red),
-          li(pAColor.green, pBColor.green),
-          li(pAColor.blue, pBColor.blue)
-        )
-      case (Some(pA), None) => pA._2
-      case (None, Some(pB)) => pB._2
-      case _ => Color(0, 0, 0)
-    }
+            def interp(x: Int, y: Int): Int =
+              ((wa * x + wb * y) / (wa + wb)).round.toInt
 
-  /**
-   * (Partial) function that calculates a transformed value based on source range &
-   * source value (actual values) to target range (color value)
-   *
-   * @param pointValueMin value at point A
-   * @param pointValueMax value at point B
-   * @param value         between A & B
-   * @param colorValueMin target range lowerbound
-   * @param colorValueMax target range upperbound
-   * @return inperpolated value
-   */
-  def linearInterpolationValue(pointValueMin: Double, pointValueMax: Double, value: Double)
-      (colorValueMin: Int, colorValueMax: Int): Int = {
-    val factor = (value - pointValueMin) / (pointValueMax - pointValueMin)
-    round(colorValueMin + (colorValueMax - colorValueMin) * factor).toInt
+            val ca = a._2
+            val cb = b._2
+            Color(interp(ca.red, cb.red), interp(ca.green, cb.green), interp(ca.blue, cb.blue))
+          }
+        }
+    }
   }
 
   /**
@@ -115,46 +105,28 @@ object Visualization {
    * @return A 360×180 image where each pixel shows the predicted temperature at its location
    */
   def visualize(temperatures: Iterable[(Location, Temperature)],
-                colors: Iterable[(Temperature, Color)]): Image = {
-    val imageWidth = 360
-    val imageHeight = 180
-
-    val locationMap = posToLocation(imageWidth, imageHeight) _
-
-    val pixels = (0 until imageHeight * imageHeight).par.map {
-      pos =>
-        pos -> interpolateColor(
-          colors,
-          predictTemperature(
-            temperatures,
-            locationMap(pos)
-          )
-        ).pixel()
-    }
-        .seq
-        .sortBy(_._1)
-        .map(_._2)
-    Image(imageWidth, imageHeight, pixels.toArray)
+      colors: Iterable[(Temperature, Color)]): Image = {
+    val coords = for {
+      i <- 0 until height
+      j <- 0 until width
+    } yield (i, j)
+    val pixels = coords.par
+        .map(transformCoord)
+        .map(predictTemperature(temperatures, _))
+        .map(interpolateColor(colors, _))
+        .map(col => Pixel(col.red, col.green, col.blue, 255))
+        .toArray
+    Image(width, height, pixels)
   }
 
   /**
-   * (Partial) function that returns a Location based on a position in an image
-   * (starting from top left (90.0, -180.0 | 0, 0) moving right -> down),
-   * taking in account the image dimensions
-   *
-   * @param imageWidth pixels
-   * @param imageHeight pixels
-   * @param pos withing image as y * imageWidth + x
-   * @return Location (lat long)
+   * @param coord Pixel coordinates
+   * @return Latitude and longitude
    */
-  def posToLocation(imageWidth: Int, imageHeight: Int)(pos: Int): Location = {
-    val widthFactor = 180 * 2 / imageWidth.toDouble
-    val heightFactor = 90 * 2 / imageHeight.toDouble
-
-    val x = pos % imageWidth
-    val y = pos / imageHeight
-
-    Location(90 - (y * heightFactor), (x * widthFactor) - 180)
+  def transformCoord(coord: (Int, Int)): Location = {
+    val lon = (coord._2 - width / 2) * (360 / width)
+    val lat = -(coord._1 - height / 2) * (180 / height)
+    Location(lat, lon)
   }
 
 }

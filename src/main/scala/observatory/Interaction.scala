@@ -2,53 +2,56 @@ package observatory
 
 import com.sksamuel.scrimage.{Image, Pixel}
 
-import observatory.Visualization._
+import math.{Pi, atan, pow, sinh, toDegrees}
+import Visualization.{interpolateColor, predictTemperature, transformCoord}
+
+import scala.collection.GenSeq
+
 /**
  * 3rd milestone: interactive visualization
  */
 object Interaction {
 
+  val power: Int = 8
+  val width: Int = pow(2, power).toInt
+  val height: Int = pow(2, power).toInt
+  val alpha: Int = 127
+
   /**
-   * @param zoom Zoom level
-   * @param x    X coordinate
-   * @param y    Y coordinate
+   * @param tile Tile coordinates
    * @return The latitude and longitude of the top-left corner of the tile,
    *         as per http://wiki.openstreetmap.org/wiki/Slippy_map_tilenames
    */
-  def tileLocation(zoom: Int, x: Int, y: Int): Location = Tile(x, y, zoom).location
+  def tileLocation(tile: Tile): Location = {
+    val lat = toDegrees(atan(sinh(Pi - (tile.y * 2 * Pi) / pow(2, tile.zoom))))
+    val lon = (tile.x * 360) / pow(2, tile.zoom) - 180
+    Location(lat, lon)
+  }
 
   /**
    * @param temperatures Known temperatures
    * @param colors       Color scale
-   * @param zoom         Zoom level
-   * @param x            X coordinate
-   * @param y            Y coordinate
-   * @return A 256×256 image showing the contents of the tile defined by `x`, `y` and `zooms`
+   * @param tile         Tile coordinates
+   * @return A 256×256 image showing the contents of the given tile
    */
-  def tile(temperatures: Iterable[(Location, Double)], colors: Iterable[(Double, Color)],
-           zoom: Int, x: Int, y: Int): Image = {
-    val imageWidth = 256
-    val imageHeight = 256
+  def tile(temperatures: Iterable[(Location, Temperature)], colors: Iterable[(Temperature, Color)], tile: Tile): Image = {
+    val offX = (tile.x * pow(2, power)).toInt
+    val offY = (tile.y * pow(2, power)).toInt
+    val offZ = tile.zoom
+    val coords = for {
+      i <- 0 until height
+      j <- 0 until width
+    } yield (i, j)
 
-    val pixels = (0 until imageWidth * imageHeight)
-        .par.map(pos => {
-      // column of image as fraction with offset x
-      val xPos = (pos % imageWidth).toDouble / imageWidth + x
-      // row of image as fraction with offset y
-      val yPos = (pos / imageHeight).toDouble / imageHeight + y
+    val pixels = coords.par
+        .map({ case (y, x) => Tile(x + offX, y + offY, power + offZ) })
+        .map(tileLocation)
+        .map(predictTemperature(temperatures, _))
+        .map(interpolateColor(colors, _))
+        .map(col => Pixel(col.red, col.green, col.blue, alpha))
+        .toArray
 
-      pos -> interpolateColor(
-        colors,
-        predictTemperature(
-          temperatures,
-          Tile(xPos, yPos, zoom).location
-        )
-      ).pixel(127)
-    })
-        .seq
-        .sortBy(_._1)
-        .map(_._2)
-    Image(imageWidth, imageHeight, pixels.toArray)
+    Image(width, height, pixels)
   }
 
   /**
@@ -61,16 +64,14 @@ object Interaction {
    */
   def generateTiles[Data](
       yearlyData: Iterable[(Year, Data)],
-      generateImage: (Int, Int, Int, Int, Data) => Unit
+      generateImage: (Year, Tile, Data) => Unit
   ): Unit = {
-    val _ = for {
-      (year, data) <- yearlyData
-      zoom <- 0 to 3
-      x <- 0 until 1 << zoom
-      y <- 0 until 1 << zoom
-    } {
-      generateImage(year, zoom, x, y, data)
-    }
+    val tiles = for {
+      zoom <- 0 until 4
+      x <- 0 until pow(2, zoom).toInt
+      y <- 0 until pow(2, zoom).toInt
+      yearData <- yearlyData
+    } yield generateImage(yearData._1, Tile(x, y, zoom), yearData._2)
   }
 
 }

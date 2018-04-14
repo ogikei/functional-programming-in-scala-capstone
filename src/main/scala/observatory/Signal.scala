@@ -3,7 +3,9 @@ package observatory
 import scala.util.DynamicVariable
 
 class Signal[T](expr: => T) {
+
   import Signal._
+
   private var myExpr: () => T = _
   private var myValue: T = _
   private var observers: Set[Signal[_]] = Set()
@@ -31,7 +33,7 @@ class Signal[T](expr: => T) {
     computeValue()
   }
 
-  def apply() = {
+  def apply(): T = {
     observers += caller.value
     assert(!caller.value.observers.contains(this), "cyclic signal definition")
     caller.value.observed ::= this
@@ -48,10 +50,11 @@ object Var {
 }
 
 object NoSignal extends Signal[Nothing](???) {
-  override def computeValue() = ()
+  override def computeValue(): Unit = ()
 }
 
 object Signal {
   val caller = new DynamicVariable[Signal[_]](NoSignal)
+
   def apply[T](expr: => T) = new Signal(expr)
 }
