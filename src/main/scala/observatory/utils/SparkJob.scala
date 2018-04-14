@@ -5,7 +5,7 @@ import org.apache.log4j.Level
 
 import org.apache.spark.sql.SparkSession
 
-class SparkJob {
+trait SparkJob {
 
   Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
 
