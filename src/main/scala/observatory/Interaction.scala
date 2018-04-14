@@ -61,7 +61,7 @@ object Interaction {
    */
   def generateTiles[Data](
       yearlyData: Iterable[(Year, Data)],
-      generateImage: (Year, Tile, Data) => Unit
+      generateImage: (Int, Int, Int, Int, Data) => Unit
   ): Unit = {
     val _ = for {
       (year, data) <- yearlyData
